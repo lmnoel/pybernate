@@ -25,3 +25,11 @@ class NoSuchEntityException(PybernateException):
 
     def __str__(self):
         return "There is no {} by id {}".format(self.name, self.id)
+
+
+class ServiceAlreadyRegisteredException(PybernateException):
+    def __init__(self, name):
+        self.name = name
+
+    def __str__(self):
+        return "There is already a service for {} ".format(self.name)

@@ -33,8 +33,12 @@ class IdEntity(Entity):
         self.override_methods()
 
     def _mixin(self, data):
-        self.lazies -= data.keys()
-        self.elements = {**self.elements, **data}
+        if isinstance(data, dict):
+            self.lazies -= data.keys()
+            self.elements = {**self.elements, **data}
+        elif isinstance(data, IdEntity):
+            self.elements[data.table] = data
+
 
     def set_table(self, table_name):
         self.table = table_name
@@ -123,7 +127,13 @@ class IdEntity(Entity):
         return "SELECT * FROM {} WHERE {} = {}".format(self.table, self.id_column, self.id)
 
     def get_eager_fields(self):
-        return self.elements.keys() - self.lazies - self.transients - self.one_to_many.keys()
+        return self.elements.keys() - self.lazies - self.transients - self.one_to_many.keys() - self.many_to_one.keys()
+
+    def get_many_to_one_relationships(self):
+        return self.many_to_one
+
+    def get_one_to_many_relationships(self):
+        return self.one_to_many
 
     def get_select_lazy_query(self):
         fields = self.get_eager_fields()

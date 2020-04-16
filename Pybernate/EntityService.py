@@ -1,10 +1,10 @@
 from Pybernate.Exceptions import NoMatchingSchemaException, NoSuchEntityException
 
-
 class EntityService:
-    def __init__(self, clazz, connection):
+    def __init__(self, clazz, connection, session):
         self.connection = connection
         self.clazz = clazz
+        self.session = session
 
     def get_conn(self):
         return self.connection.cursor()
@@ -46,7 +46,7 @@ class EntityService:
 
 
 class IdEntityService(EntityService):
-    def _by_id(self, entity_id, cursor):
+    def _by_id(self, entity_id, cursor, suppress_attribute=None):
         entity = self.clazz()
         entity.set_id(entity_id)
         try:
@@ -57,7 +57,40 @@ class IdEntityService(EntityService):
         if data == None:
             raise NoSuchEntityException(self.clazz.__name__, entity_id)
         entity.init_lazy(data)
+        entity = self._init_one_to_many(entity, suppress_attribute)
+        entity = self._init_many_to_one(entity, suppress_attribute)
         return entity
+
+    def _init_many_to_one(self, entity, suppress_attribute):
+        for other_class, join_column, foreign_key in entity.get_many_to_one_relationships().values():
+            if other_class == suppress_attribute:
+                continue
+            other_service = self.session.services[other_class]
+            this_key = entity.id if join_column is entity.id_column else entity.elements[join_column]
+            loaded_entity = other_service.by_id_with_suppression(this_key, entity.table.lower())
+            loaded_entity._mixin(entity)
+            entity.elements[other_class] = loaded_entity
+        return entity
+
+    def _init_one_to_many(self, entity, supress_attribute):
+        for other_class, join_column, foreign_key in entity.get_one_to_many_relationships().values():
+            if other_class == supress_attribute:
+                continue
+            other_service = self.session.services[other_class]
+            ins = other_service.clazz()
+            this_key = entity.id if join_column is entity.id_column else entity.elements[join_column]
+            q = "SELECT {} FROM {} WHERE {} = {}".format(ins.id_column, ins.table, foreign_key, this_key)
+            with self.get_conn() as cursor:
+                cursor.execute(q)
+                ids = cursor.fetchall()
+            loaded_entities = other_service.by_ids_with_suppression([x[join_column] for x in ids], entity.table.lower())
+            [loaded_entity._mixin(entity) for loaded_entity in loaded_entities]
+            entity.elements[other_class] = loaded_entities
+        return entity
+
+    def by_id_with_suppression(self, entity_id, suppress_attribute):
+        with self.get_conn() as cursor:
+            return self._by_id(entity_id, cursor, suppress_attribute)
 
     def by_id(self, entity_id):
         with self.get_conn() as cursor:
@@ -67,8 +100,15 @@ class IdEntityService(EntityService):
         with self.get_conn() as cursor:
             return [self._by_id(entity_id, cursor) for entity_id in entity_ids]
 
+    def by_ids_with_suppression(self, entity_ids, suppress_attribute):
+        with self.get_conn() as cursor:
+            return [self._by_id(entity_id, cursor, suppress_attribute) for entity_id in entity_ids]
+
     def initialize(self, entity, fxn_name):
         with self.get_conn() as cursor:
             cursor.execute(entity.get_initialize_query(fxn_name))
             data = cursor.fetchone()
             entity._mixin(data)
+
+    def refresh(self, entity):
+        raise NotImplementedError

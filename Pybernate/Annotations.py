@@ -60,11 +60,12 @@ class oneToMany:
     def __init__(self, **kwargs):
         self.join_table = kwargs["join_table"]
         self.join_column = kwargs["join_column"]
+        self.foreign_key = kwargs["foreign_key"]
 
     def __call__(self, fn):
         @functools.wraps(fn)
         def decorated(*args, **kwargs):
-            args[0].addOneToMany(fn.__name__, (self.join_table, self.join_column))
+            args[0].addOneToMany(fn.__name__, (self.join_table, self.join_column, self.foreign_key))
             fn(*args, **kwargs)
         return decorated
 
@@ -73,10 +74,11 @@ class manyToOne:
     def __init__(self, **kwargs):
         self.join_table = kwargs["join_table"]
         self.join_column = kwargs["join_column"]
+        self.foreign_key = kwargs["foreign_key"]
 
     def __call__(self, fn):
         @functools.wraps(fn)
         def decorated(*args, **kwargs):
-            args[0].addManyToOne(fn.__name__, (self.join_table, self.join_column))
+            args[0].addManyToOne(fn.__name__, (self.join_table, self.join_column, self.foreign_key))
             fn(*args, **kwargs)
         return decorated

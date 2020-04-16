@@ -4,6 +4,7 @@ from Pybernate.EntityService import IdEntityService
 from Pybernate.Entity import IdEntity
 from Pybernate.Annotations import lazy, transient, id, oneToMany, manyToOne
 from Pybernate.Exceptions import LazyInitializationException, NoMatchingSchemaException, NoSuchEntityException
+from Pybernate.Session import PybernateSession
 
 
 class Foo(IdEntity):
@@ -18,10 +19,6 @@ class Foo(IdEntity):
 
     def set_b(self, val):
         return
-
-    def get_bar(self):
-        return
-
 
 class Bar(IdEntity):
     @id
@@ -56,22 +53,29 @@ class Zoo(IdEntity):
     def set_c(self, val):
         return
 
-class Bez: #forward declaration
-    pass
+
 
 class Fez(IdEntity):
 
     def get_a(self):
         return
 
-    @oneToMany(join_column="id", join_table=Bez)
+    @oneToMany(join_column="id", join_table="bez", foreign_key="foreign_id")
     def get_bez(self):
         return
 
-class Bez(IdEntity):
+    def add_bez(self, bez): # also update
+        return
 
-    @manyToOne(join_column="foreign_id", join_table=Fez)
+    def delete_bez(self):
+        return
+
+class Bez(IdEntity):
+    @manyToOne(join_column="foreign_id", join_table="fez", foreign_key="id")
     def get_fez(self):
+        return
+
+    def get_foreign_id(self):
         return
 
 class Test(unittest.TestCase):
@@ -83,11 +87,13 @@ class Test(unittest.TestCase):
                                      db='Pybernate',
                                      charset='utf8mb4',
                                      cursorclass=pymysql.cursors.DictCursor)
-        self.foo_service = IdEntityService(Foo, self.connection)
-        self.bar_service = IdEntityService(Bar, self.connection)
-        self.baz_service = IdEntityService(Baz, self.connection)
-        self.fez_service = IdEntityService(Fez, self.connection)
-        self.bez_service = IdEntityService(Bez, self.connection)
+        self.session = PybernateSession(self.connection)
+        self.session.register_class(Foo, Bar, Baz, Fez, Bez)
+        self.foo_service = self.session.get_foo_service()
+        self.bar_service = self.session.get_bar_service()
+        self.baz_service = self.session.get_baz_service()
+        self.fez_service = self.session.get_fez_service()
+        self.bez_service = self.session.get_bez_service()
         with self.connection.cursor() as cursor:
             cursor.execute("CREATE TABLE IF NOT EXISTS foo (a int, b VARCHAR(10), id INT AUTO_INCREMENT KEY)")
             cursor.execute("CREATE TABLE IF NOT EXISTS bar (c INT, d VARCHAR(10), not_id INT AUTO_INCREMENT KEY)")
@@ -158,7 +164,7 @@ class Test(unittest.TestCase):
         except NoSuchEntityException:
             pass
 
-    def test_one_to_many(self): # TODO
+    def test_one_to_many(self):
         fez = Fez(a=1)
         self.fez_service.save(fez)
         bez_0 = Bez(foreign_id=fez.id)
@@ -167,3 +173,10 @@ class Test(unittest.TestCase):
 
         fez_too = self.fez_service.by_id(fez.id)
         bezzes = fez_too.get_bez()
+        assert len(bezzes) == 2
+        for bez in bezzes:
+            assert bez.get_foreign_id() == fez.get_id()
+
+    def tet_many_to_one(self):
+
+        assert False
