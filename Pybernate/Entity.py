@@ -17,11 +17,14 @@ class Entity:
     def get_dirty(self):
         return self.persisted
 
+    def rollback(self):
+        pass
+
 class IdEntity(Entity):
     def __init__(self, **kwargs):
         super().__init__()
         self.id = None
-        self.table = self.get_subclass_name()
+        self.table = self.get_subclass_name().lower()
         self.lazies = set()
         self.transients = set()
         self.elements = {}

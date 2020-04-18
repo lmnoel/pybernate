@@ -61,11 +61,12 @@ class oneToMany:
         self.join_table = kwargs["join_table"]
         self.join_column = kwargs["join_column"]
         self.foreign_key = kwargs["foreign_key"]
+        self.mapped_by = kwargs["mapped_by"] if "mapped_by" in kwargs else None
 
     def __call__(self, fn):
         @functools.wraps(fn)
         def decorated(*args, **kwargs):
-            args[0].addOneToMany(fn.__name__, (self.join_table, self.join_column, self.foreign_key))
+            args[0].addOneToMany(fn.__name__, (self.join_table, self.join_column, self.foreign_key, self.mapped_by))
             fn(*args, **kwargs)
         return decorated
 
