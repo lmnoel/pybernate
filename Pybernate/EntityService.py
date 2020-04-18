@@ -1,88 +1,143 @@
 from Pybernate.Exceptions import NoMatchingSchemaException, NoSuchEntityException, InvalidEntityServiceException
+from cachetools import LFUCache
 from collections import Iterable
 
-class EntityService:
-    def __init__(self, clazz, connection, session):
-        self.connection = connection
-        self.clazz = clazz
-        self.session = session
 
-    def get_conn(self):
-        return self.connection.cursor()
+class SafeExecutor:
+    def __init__(self, name):
+        self.name = name
 
-    def safe_execute(self, cursor, query, values):
+    def execute(self, cursor, query, values):
         try:
             cursor.execute(query, values)
         except Exception:
-            raise NoMatchingSchemaException(self.get_name())
-
-    def get_name(self):
-        return self.clazz.__name__
-
-    # TODO: entities have erroneous id if transaction is rolled back
-    def _save(self, entity, cursor):
-        if entity.id is None:
-            self.safe_execute(cursor, entity.get_insert_query(), entity.get_raw_elements())
-            entity.id = cursor.lastrowid
-            entity.set_persisted()
-        else:
-            self.safe_execute(cursor, entity.get_update_query(), ())
-            entity.set_dirty(False)
-
-    def save(self, to_save):
-        if isinstance(to_save, self.clazz):
-            with self.get_conn() as cursor:
-                self._save(to_save, cursor)
-            self.session.transactional_commit()
-        elif isinstance(to_save, Iterable):
-            first = True
-            with self.get_conn() as cursor:
-                for entity_to_save in to_save:
-                    if first:
-                        self.check_type(entity_to_save)
-                        first = False
-                    self._save(entity_to_save, cursor)
-            self.session.transactional_commit()
-        else:
-            raise InvalidEntityServiceException(to_save.__class__.__name__, self.get_name())
-
-    def check_type(self, entity):
-        if not isinstance(entity, self.clazz):
-            raise InvalidEntityServiceException(entity.__class__.__name__, self.get_name())
-
-    def delete(self, to_delete):
-        if isinstance(to_delete, self.clazz):
-            with self.get_conn() as cursor:
-                self.safe_execute(cursor, to_delete.get_delete_query(), ())
-            self.session.transactional_commit()
-        elif isinstance(to_delete, Iterable):
-            with self.get_conn() as cursor:
-                first = True
-                for entity_to_delete in to_delete:
-                    if first:
-                        self.check_type(entity_to_delete)
-                        first = False
-                    self.safe_execute(cursor, entity_to_delete.get_delete_query(), ())
-            self.session.transactional_commit()
-        else:
-            raise InvalidEntityServiceException(to_delete.__class__.__name__, self.get_name())
+            raise NoMatchingSchemaException(self.name)
 
 
-class IdEntityService(EntityService):
-    def _by_id(self, entity_id, cursor, suppress_attribute=None):
+class EntityCache(LFUCache):
+    def __init__(self, maxsize, connection, clazz, safe_executor):
+        super(EntityCache, self).__init__(maxsize)
+        self.connection = connection
+        self.clazz = clazz
+        self.safe_executor = safe_executor
+
+    def get_cursor(self):
+        return self.connection.cursor()
+
+    def _by_id(self, id, cursor):
         entity = self.clazz()
-        entity.set_id(entity_id)
+        entity.set_id(id)
         try:
             cursor.execute(entity.get_select_lazy_query())
         except Exception:
             raise NoMatchingSchemaException(self.clazz.__name__)
         data = cursor.fetchone()
         if data == None:
-            raise NoSuchEntityException(self.clazz.__name__, entity_id)
+            raise NoSuchEntityException(self.clazz.__name__, id)
         entity.init_lazy(data)
-        entity = self._init_one_to_many(entity, suppress_attribute)
-        entity = self._init_many_to_one(entity, suppress_attribute)
+        entity.set_initialized(False)
+        self.cache(entity.get_id(), entity)
         return entity
+
+    def get_by_id(self, id):
+        entity = self.get(id, None)
+        if entity is not None:
+            if entity.get_deleted():
+                raise NoSuchEntityException(self.clazz.__name__, id)
+            return entity
+        with self.connection.cursor() as cursor:
+            return self._by_id(id, cursor)
+
+    def get_by_ids(self, ids): # todo optimize
+        entities = []
+        with self.connection.cursor() as cursor:
+            for id in ids:
+                entities.append(self._by_id(id, cursor))
+        return entities
+
+    def _set(self, entity, cursor):
+        if entity.id is None:
+            self.safe_executor.execute(cursor, entity.get_insert_query(), entity.get_raw_elements())
+            entity.id = cursor.lastrowid
+        else:
+            entity.set_dirty(True)
+        self.cache(entity.id, entity)
+
+    def set(self, to_set):
+        if isinstance(to_set, self.clazz):
+            with self.connection.cursor() as cursor:
+                self._set(to_set, cursor)
+        elif isinstance(to_set, Iterable):
+            with self.connection.cursor() as cursor:
+                for entity_to_set in to_set:
+                    self._set(entity_to_set, cursor)
+        else:
+            raise InvalidEntityServiceException(to_set.__class__.__name__, self.clazz.__name__)
+
+    def _delete(self, to_delete):
+        to_delete.set_deleted(True)
+        self.cache(to_delete.get_id(), to_delete)
+
+    def delete(self, to_delete):
+        if isinstance(to_delete, self.clazz):
+            self._delete(to_delete)
+        elif isinstance(to_delete, Iterable):
+            [self._delete(entity_to_delete) for entity_to_delete in to_delete]
+        else:
+            raise InvalidEntityServiceException(to_delete.__class__.__name__, self.clazz.__name__)
+
+    def popitem(self):
+        key, entity = super().popitem()
+        with self.connection.cursor() as cursor:
+            if entity.get_deleted():
+                self.safe_executor.execute(cursor, entity.get_delete_query(), ())
+            elif entity.get_dirty():
+                self.safe_executor.execute(cursor, entity.get_update_query(), ())
+
+    def cache(self, key, value):
+        super().__setitem__(key, value)
+
+    # todo: not efficient to call popitem and get a cursor for each element
+    def flush(self):
+        self.clear()
+
+
+class EntityService:
+    def __init__(self, clazz, connection, session, maxsize):
+        self.connection = connection
+        self.clazz = clazz
+        self.session = session
+        self.safe_executor = SafeExecutor(self.get_name())
+        self.cache = EntityCache(maxsize, self.connection, self.clazz, self.safe_executor)
+
+    def flush_cache(self):
+        self.cache.flush()
+
+    def get_conn(self):
+        return self.connection.cursor()
+
+    def get_name(self):
+        return self.clazz.__name__
+
+    def save(self, to_save):
+        self.cache.set(to_save)
+
+    def delete(self, to_delete):
+        self.cache.delete(to_delete)
+
+
+class IdEntityService(EntityService):
+    def by_id(self, entity_id, suppression=None):
+        entity = self.cache.get_by_id(entity_id)
+        if not entity.get_initialized():
+            entity = self._init_one_to_many(entity, suppression)
+            entity = self._init_many_to_one(entity, suppression)
+            self.cache.set(entity)
+        return entity
+
+
+    def by_ids(self, entity_ids, suppression=None):
+            return [self.by_id(entity_id, suppression) for entity_id in entity_ids]
 
     def _init_many_to_one(self, entity, suppress_attribute):
         for other_class, join_column, foreign_key in entity.get_many_to_one_relationships().values():
@@ -90,7 +145,7 @@ class IdEntityService(EntityService):
                 continue
             other_service = self.session.services[other_class]
             this_key = entity.id if join_column is entity.id_column else entity.elements[join_column]
-            loaded_entity = other_service.by_id_with_suppression(this_key, entity.table.lower())
+            loaded_entity = other_service.by_id(this_key, entity.table.lower())
             loaded_entity._mixin(entity)
             entity.elements[other_class] = loaded_entity
         return entity
@@ -106,7 +161,7 @@ class IdEntityService(EntityService):
             with self.get_conn() as cursor:
                 cursor.execute(q)
                 ids = cursor.fetchall()
-            loaded_entities = other_service.by_ids_with_suppression([x[join_column] for x in ids], entity.table.lower())
+            loaded_entities = other_service.by_ids([x[join_column] for x in ids], entity.table.lower())
             [loaded_entity._mixin(entity) for loaded_entity in loaded_entities]
             if mapped_by is not None:
                 mapped_entities = {}
@@ -117,24 +172,7 @@ class IdEntityService(EntityService):
                 entity.elements[other_class] = loaded_entities
         return entity
 
-    def by_id_with_suppression(self, entity_id, suppress_attribute):
-        with self.get_conn() as cursor:
-            return self._by_id(entity_id, cursor, suppress_attribute)
-
-    def by_id(self, entity_id):
-        with self.get_conn() as cursor:
-            return self._by_id(entity_id, cursor)
-
-    def by_ids(self, entity_ids):
-        with self.get_conn() as cursor:
-            return [self._by_id(entity_id, cursor) for entity_id in entity_ids]
-
-    def by_ids_with_suppression(self, entity_ids, suppress_attribute):
-        with self.get_conn() as cursor:
-            return [self._by_id(entity_id, cursor, suppress_attribute) for entity_id in entity_ids]
-
     def initialize(self, entity, attribute):
-        self.check_type(entity)
         with self.get_conn() as cursor:
             cursor.execute(entity.get_initialize_query(attribute))
             data = cursor.fetchone()

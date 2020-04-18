@@ -147,6 +147,7 @@ class Test(unittest.TestCase):
     def test_lazy_initialization(self):
         bar = Bar(c=2, d="three")
         self.bar_service.save(bar)
+        self.bar_service.flush_cache()
         bar_too = self.bar_service.by_id(bar.id)
         try:
             bar_too.get_d()
@@ -221,35 +222,37 @@ class Test(unittest.TestCase):
         except InvalidEntityServiceException:
             pass
 
-    def test_transactional_context(self):
-        fez_0 = Fez(a=0)
-        fez_1 = Fez(a=1)
-        fez_2 = Fez(a=2)
+    def test_cache(self):
+        i_map = {}
+        for i in range(50):
+            foo = Foo(a=i, b=str(i))
+            self.foo_service.save(foo)
+            i_map[i] = foo.get_id()
 
-        # rollback works in context
-        try:
-            with self.session.transactional():
-                self.fez_service.save(fez_0)
-                raise RuntimeError()
-        except RuntimeError:
-            pass
-        assert self._check_entity_count("fez", "id", fez_0.id) == 0
+        for i in range(50):
+            loaded_foo = self.foo_service.by_id(i_map[i])
+            assert loaded_foo.get_a() == i
+            if i % 2 == 0:
+                loaded_foo.set_a(i * 2)
+                self.foo_service.save(loaded_foo)
 
-        # rollback works not in context
-        self.session.begin_transaction()
-        self.fez_service.save(fez_1)
-        self.session.rollback_transaction()
-        assert self._check_entity_count("fez", "id", fez_1.id) == 0
+        for i in range(50):
+            loaded_foo = self.foo_service.by_id(i_map[i])
+            if i % 2 == 0:
+                assert loaded_foo.get_a() == i * 2
+            else:
+                assert loaded_foo.get_a() == i
 
-        # entities are saved when no rollback/exceptions
-        with self.session.transactional():
-            self.fez_service.save(fez_2)
+        for i in range(0, 50, 3):
+            loaded_foo = self.foo_service.by_id(i_map[i])
+            self.foo_service.delete(loaded_foo)
 
-        assert self._check_entity_count("fez", "id", fez_2.id) == 1
-
-
-    def _check_entity_count(self, entity_name, id_column, id):
-        with self.connection.cursor() as cursor:
-            cursor.execute("SELECT * FROM {} WHERE {} = {}".format(entity_name, id_column, id))
-            data = cursor.fetchall()
-            return len(data)
+        for i in range(50):
+            if i % 3 == 0:
+                try:
+                    self.foo_service.by_id(i_map[i])
+                    assert False
+                except NoSuchEntityException:
+                    pass
+            else:
+                self.foo_service.by_id(i_map[i])

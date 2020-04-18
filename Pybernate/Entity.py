@@ -2,20 +2,27 @@ from Pybernate.Exceptions import LazyInitializationException
 
 class Entity:
     def __init__(self):
-        self.persisted = False
+        self.deleted = False
         self.dirty = False
-
-    def set_persisted(self):
-        self.persisted = True
-
-    def get_persisted(self):
-        return self.persisted
+        self.initialized = False
 
     def set_dirty(self, state):
         self.dirty = state
 
     def get_dirty(self):
-        return self.persisted
+        return self.dirty
+
+    def set_deleted(self, state):
+        self.deleted = state
+
+    def get_deleted(self):
+        return self.deleted
+
+    def set_initialized(self, state):
+        self.initialized = state
+
+    def get_initialized(self):
+        return self.initialized
 
     def rollback(self):
         pass
@@ -97,7 +104,7 @@ class IdEntity(Entity):
                 getattr(self, method)(None)
                 if method in self.transients:
                     continue
-                setattr(self, method, lambda value: self.set_element(method_target, value))
+                setattr(self, method, lambda value, x=method_target: self.set_element(x, value))
 
     def get_element(self, x):
         if x in self.lazies:
